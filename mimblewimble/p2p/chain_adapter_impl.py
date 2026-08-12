@@ -21,8 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from io import BytesIO
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from mimblewimble.blockchain import (
     BlockHeader,
@@ -36,6 +35,7 @@ from mimblewimble.p2p.peers import BlockRecord, HeaderRecord, OutputRecord
 from mimblewimble.pool import TxPool, TxValidationError
 from mimblewimble.pow.blockdb import IBlockDB, InMemoryBlockDB
 from mimblewimble.serializer import Serializer
+from mimblewimble.mmr.segment import SegmentType
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +72,15 @@ class ConcreteChainAdapter(ChainAdapter):
 
         # Transaction pool (Dandelion++ stem/fluff)
         self._pool: TxPool = TxPool()
+        self._pibd_segment_handler: Optional[
+            Callable[[SegmentType, bytes, object], None]
+        ] = None
+
+        best_header = self._db.get_best_header()
+        if best_header is not None:
+            self._best_height = best_header.getHeight()
+            self._best_total_difficulty = best_header.getTotalDifficulty()
+            self._best_hash = best_header.getHash()
 
     # ------------------------------------------------------------------
     # ChainAdapter — read-only queries
@@ -136,7 +145,8 @@ class ConcreteChainAdapter(ChainAdapter):
         accepted = 0
         for raw in raw_headers:
             try:
-                s = Serializer(BytesIO(raw))
+                s = Serializer()
+                s.write(raw)
                 header = BlockHeader.deserialize(s)
             except Exception as exc:
                 log.warning("Failed to deserialise header: %s", exc)
@@ -197,17 +207,35 @@ class ConcreteChainAdapter(ChainAdapter):
     # PIBD segments  (delegated to the TxHashSet / Desegmenter layer)
     # ------------------------------------------------------------------
 
+    def set_pibd_segment_handler(
+        self, handler: Optional[Callable[[SegmentType, bytes, object], None]]
+    ) -> None:
+        with self._lock:
+            self._pibd_segment_handler = handler
+
+    def _receive_pibd_segment(
+        self, segment_type: SegmentType, block_hash: bytes, segment: object
+    ) -> None:
+        with self._lock:
+            handler = self._pibd_segment_handler
+        if handler is None:
+            log.debug(
+                "Dropping %s segment without an active StateSync", segment_type.name
+            )
+            return
+        handler(segment_type, block_hash, segment)
+
     def receive_bitmap_segment(self, block_hash: bytes, segment) -> None:
-        pass
+        self._receive_pibd_segment(SegmentType.BITMAP, block_hash, segment)
 
     def receive_output_segment(self, block_hash: bytes, segment) -> None:
-        pass
+        self._receive_pibd_segment(SegmentType.OUTPUT, block_hash, segment)
 
     def receive_rangeproof_segment(self, block_hash: bytes, segment) -> None:
-        pass
+        self._receive_pibd_segment(SegmentType.RANGEPROOF, block_hash, segment)
 
     def receive_kernel_segment(self, block_hash: bytes, segment) -> None:
-        pass
+        self._receive_pibd_segment(SegmentType.KERNEL, block_hash, segment)
 
     # ------------------------------------------------------------------
     # Block sync
@@ -219,7 +247,8 @@ class ConcreteChainAdapter(ChainAdapter):
         Returns True if newly accepted; False if already known.
         """
         try:
-            s = Serializer(BytesIO(raw_block))
+            s = Serializer()
+            s.write(raw_block)
             block = FullBlock.deserialize(s)
         except Exception as exc:
             log.warning("handle_block: failed to deserialise: %s", exc)
@@ -277,10 +306,10 @@ class ConcreteChainAdapter(ChainAdapter):
         """
         from mimblewimble.blockchain import BlockHeader
         from mimblewimble.serializer import Serializer
-        from io import BytesIO
 
         try:
-            s = Serializer(BytesIO(raw_compact_block))
+            s = Serializer()
+            s.write(raw_compact_block)
             header = BlockHeader.deserialize(s)
             # Read nonce and counts
             nonce = int.from_bytes(s.read(8), "big")

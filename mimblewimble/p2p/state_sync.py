@@ -328,6 +328,18 @@ class StateSync:
     # Segment delivery callbacks (called from peer dispatch)
     # ------------------------------------------------------------------
 
+    def receive_segment(
+        self, segment_type: SegmentType, block_hash: bytes, segment: object
+    ) -> None:
+        if segment_type == SegmentType.BITMAP:
+            self.receive_bitmap_segment(block_hash, segment)
+        elif segment_type == SegmentType.OUTPUT:
+            self.receive_output_segment(block_hash, segment)
+        elif segment_type == SegmentType.RANGEPROOF:
+            self.receive_rangeproof_segment(block_hash, segment)
+        elif segment_type == SegmentType.KERNEL:
+            self.receive_kernel_segment(block_hash, segment)
+
     def receive_bitmap_segment(self, block_hash: bytes, segment) -> None:
         if self._desegmenter is None:
             return

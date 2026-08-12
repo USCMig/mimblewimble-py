@@ -50,14 +50,17 @@ from mimblewimble.p2p.message import (
 
 
 class TestMagicAndFraming:
+    def test_protocol_version_matches_current_grin(self):
+        assert PROTOCOL_VERSION == 1000
+
     def test_mainnet_magic_bytes(self):
         assert MAINNET_MAGIC == bytes([0x61, 0x3D])
 
     def test_testnet_magic_bytes(self):
         assert TESTNET_MAGIC == bytes([0x83, 0xC1])
 
-    def test_header_length_is_14(self):
-        assert HEADER_LEN == 14  # 2 magic + 4 type + 8 body_len
+    def test_header_length_is_11(self):
+        assert HEADER_LEN == 11  # 2 magic + 1 type + 8 body_len
 
     def test_pack_header_length(self):
         body = b"\xde\xad\xbe\xef"
@@ -117,6 +120,12 @@ class TestCapabilities:
     def test_pibd_hist_is_bit_4(self):
         assert int(Capabilities.PIBD_HIST) == 16
 
+    def test_block_hist_is_bit_5(self):
+        assert int(Capabilities.BLOCK_HIST) == 32
+
+    def test_pibd_hist_1_is_bit_6(self):
+        assert int(Capabilities.PIBD_HIST_1) == 64
+
     def test_full_node_combines_base_caps(self):
         expected = (
             Capabilities.FULL_HIST
@@ -124,6 +133,7 @@ class TestCapabilities:
             | Capabilities.PEER_LIST
             | Capabilities.TX_KERNEL_HASH
             | Capabilities.PIBD_HIST
+            | Capabilities.PIBD_HIST_1
         )
         assert int(Capabilities.FULL_NODE) == int(expected)
 
@@ -160,19 +170,22 @@ class TestPeerAddr:
         r = self._roundtrip("[::1]:3414")
         assert r.addr == "[::1]:3414"
 
-    def test_hostname_roundtrip(self):
-        r = self._roundtrip("node.example.com:3414")
-        assert r.addr == "node.example.com:3414"
+    def test_hostname_is_not_a_wire_peer_address(self):
+        with pytest.raises(ValueError):
+            PeerAddr(addr="node.example.com:3414").serialize()
 
-    def test_empty_addr_roundtrip(self):
-        r = self._roundtrip("")
-        assert r.addr == ""
+    def test_empty_address_is_not_a_wire_peer_address(self):
+        with pytest.raises(ValueError):
+            PeerAddr(addr="").serialize()
 
     def test_serialize_is_length_prefixed(self):
         pa = PeerAddr(addr="a:1")
-        raw = pa.serialize()
-        (length,) = struct.unpack_from("<I", raw, 0)
-        assert length == len("a:1".encode())
+        with pytest.raises(ValueError):
+            pa.serialize()
+
+    def test_serialize_uses_grin_ipv4_socket_address_layout(self):
+        raw = PeerAddr(addr="127.0.0.1:3414").serialize()
+        assert raw == b"\x00\x7f\x00\x00\x01\x0dV"
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +268,14 @@ class TestMsgShake:
 
 
 class TestMsgPingPong:
+    def test_ping_uses_big_endian_wire_values(self):
+        body = _body_of(MsgPing(total_difficulty=0x0102030405060708, height=9).serialize())
+        assert body == bytes.fromhex("01020304050607080000000000000009")
+
+    def test_pong_uses_big_endian_wire_values(self):
+        body = _body_of(MsgPong(total_difficulty=9, height=0x0102030405060708).serialize())
+        assert body == bytes.fromhex("00000000000000090102030405060708")
+
     def test_ping_roundtrip(self):
         original = MsgPing(total_difficulty=12345, height=99)
         body = _body_of(original.serialize())
@@ -284,6 +305,10 @@ class TestMsgPingPong:
 
 
 class TestMsgGetPeerAddrs:
+    def test_wire_capabilities_are_big_endian(self):
+        body = _body_of(MsgGetPeerAddrs(capabilities=0x01020304).serialize())
+        assert body == bytes.fromhex("01020304")
+
     def test_roundtrip(self):
         original = MsgGetPeerAddrs(capabilities=int(Capabilities.FULL_NODE))
         body = _body_of(original.serialize())
@@ -295,6 +320,10 @@ class TestMsgGetPeerAddrs:
 
 
 class TestMsgPeerAddrs:
+    def test_wire_peer_count_is_big_endian(self):
+        body = _body_of(MsgPeerAddrs(peers=[PeerAddr("10.0.0.1:3414")]).serialize())
+        assert body == bytes.fromhex("00000001000a0000010d56")
+
     def test_empty_peers_roundtrip(self):
         original = MsgPeerAddrs(peers=[])
         body = _body_of(original.serialize())
@@ -321,6 +350,10 @@ class TestMsgPeerAddrs:
 
 
 class TestMsgGetHeaders:
+    def test_wire_locator_count_is_a_single_byte(self):
+        body = _body_of(MsgGetHeaders(locator=[bytes.fromhex("ab" * 32)]).serialize())
+        assert body == b"\x01" + bytes.fromhex("ab" * 32)
+
     def test_empty_locator_roundtrip(self):
         original = MsgGetHeaders(locator=[])
         body = _body_of(original.serialize())
@@ -373,6 +406,12 @@ class TestMsgGetCompactBlock:
 
 
 class TestMsgTxHashSet:
+    def test_request_uses_big_endian_height(self):
+        body = _body_of(
+            MsgTxHashSetRequest(block_hash=b"\x11" * 32, height=0x0102030405060708).serialize()
+        )
+        assert body == b"\x11" * 32 + bytes.fromhex("0102030405060708")
+
     def test_request_roundtrip(self):
         block_hash = bytes([0x11] * 32)
         original = MsgTxHashSetRequest(block_hash=block_hash, height=12345)
@@ -391,13 +430,25 @@ class TestMsgTxHashSet:
         r = MsgTxHashSetArchive.deserialize(body)
         assert r.block_hash == block_hash
         assert r.height == 999
-        assert r.zip_bytes == zip_data
+        assert r.zip_bytes == b""
+        assert r.bytes_len == len(zip_data)
 
     def test_archive_empty_zip(self):
         original = MsgTxHashSetArchive(block_hash=b"\x00" * 32, height=0, zip_bytes=b"")
         body = _body_of(original.serialize())
         r = MsgTxHashSetArchive.deserialize(body)
         assert r.zip_bytes == b""
+        assert r.bytes_len == 0
+
+    def test_archive_frame_contains_only_big_endian_metadata(self):
+        body = _body_of(
+            MsgTxHashSetArchive(
+                block_hash=b"\x22" * 32,
+                height=0x0102030405060708,
+                zip_bytes=b"archive",
+            ).serialize()
+        )
+        assert body == b"\x22" * 32 + bytes.fromhex("01020304050607080000000000000007")
 
 
 class TestMsgBanReason:
@@ -460,20 +511,43 @@ class TestMessageTypeValues:
     def test_get_headers_is_7(self):
         assert MessageType.GetHeaders == 7
 
-    def test_headers_is_8(self):
-        assert MessageType.Headers == 8
+    def test_header_is_8(self):
+        assert MessageType.Header == 8
 
-    def test_get_block_is_9(self):
-        assert MessageType.GetBlock == 9
+    def test_headers_is_9(self):
+        assert MessageType.Headers == 9
 
-    def test_block_is_10(self):
-        assert MessageType.Block == 10
+    def test_get_block_is_10(self):
+        assert MessageType.GetBlock == 10
+
+    def test_block_is_11(self):
+        assert MessageType.Block == 11
 
     def test_compact_block_is_12(self):
-        assert MessageType.CompactBlock == 12
+        assert MessageType.GetCompactBlock == 12
 
-    def test_stem_transaction_is_13(self):
-        assert MessageType.StemTransaction == 13
+    def test_compact_block_is_13(self):
+        assert MessageType.CompactBlock == 13
 
-    def test_transaction_is_14(self):
-        assert MessageType.Transaction == 14
+    def test_stem_transaction_is_14(self):
+        assert MessageType.StemTransaction == 14
+
+    def test_transaction_is_15(self):
+        assert MessageType.Transaction == 15
+
+    def test_message_types_after_transaction_match_grin_wire_protocol(self):
+        assert [
+            MessageType.TxHashSetRequest,
+            MessageType.TxHashSetArchive,
+            MessageType.BanReason,
+            MessageType.GetTransaction,
+            MessageType.TransactionKernel,
+            MessageType.GetOutputBitmapSegment,
+            MessageType.OutputBitmapSegment,
+            MessageType.GetOutputSegment,
+            MessageType.OutputSegment,
+            MessageType.GetRangeProofSegment,
+            MessageType.RangeProofSegment,
+            MessageType.GetKernelSegment,
+            MessageType.KernelSegment,
+        ] == list(range(16, 29))

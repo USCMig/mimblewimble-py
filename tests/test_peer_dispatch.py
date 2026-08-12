@@ -1,5 +1,9 @@
 import struct
+from typing import cast
 
+from mimblewimble.p2p.adapter import ChainAdapter
+from mimblewimble.p2p.connection import Connection
+from mimblewimble.p2p.handshake import HandshakeResult
 from mimblewimble.p2p.message import MessageType
 from mimblewimble.p2p.peer import Peer
 from mimblewimble.p2p.peers import NodeStorageInMemory, PeerStore
@@ -63,9 +67,9 @@ def test_peer_dispatch_headers_persists_via_peer_store():
     peers = PeerStore(node_storage=storage)
 
     peer = Peer(
-        conn=_FakeConn(),
-        handshake=_FakeHandshake(),
-        adapter=adapter,
+        conn=cast(Connection, _FakeConn()),
+        handshake=cast(HandshakeResult, _FakeHandshake()),
+        adapter=cast(ChainAdapter, adapter),
         peer_store=peers,
     )
 
@@ -77,3 +81,24 @@ def test_peer_dispatch_headers_persists_via_peer_store():
     stored = peers.get_headers()
     assert len(stored) == 2
     assert {stored[0].raw, stored[1].raw} == {h1, h2}
+
+
+def test_peer_dispatch_single_header_persists_via_peer_store():
+    adapter = _Adapter()
+    storage = NodeStorageInMemory()
+    peers = PeerStore(node_storage=storage)
+
+    peer = Peer(
+        conn=cast(Connection, _FakeConn()),
+        handshake=cast(HandshakeResult, _FakeHandshake()),
+        adapter=cast(ChainAdapter, adapter),
+        peer_store=peers,
+    )
+
+    raw_header = b"single-header"
+    peer._dispatch(MessageType.Header, raw_header)
+
+    assert adapter.headers == [raw_header]
+    stored = peers.get_headers()
+    assert len(stored) == 1
+    assert stored[0].raw == raw_header

@@ -90,7 +90,7 @@ def test_recv_message_nonblocking_rejects_oversized_body_length():
     conn, peer = _socket_pair_connection()
     try:
         header = MAINNET_MAGIC + struct.pack(
-            "<IQ", int(MessageType.Ping), MAX_BODY_BYTES + 1
+            ">BQ", int(MessageType.Ping), MAX_BODY_BYTES + 1
         )
         peer.sendall(header)
 
@@ -104,7 +104,7 @@ def test_recv_message_nonblocking_rejects_oversized_body_length():
 def test_recv_message_nonblocking_rejects_invalid_message_type():
     conn, peer = _socket_pair_connection()
     try:
-        header = MAINNET_MAGIC + struct.pack("<IQ", 9999, 0)
+        header = MAINNET_MAGIC + struct.pack(">BQ", 255, 0)
         peer.sendall(header)
 
         with pytest.raises(ConnectionError, match="Invalid message header"):

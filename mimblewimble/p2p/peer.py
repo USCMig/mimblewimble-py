@@ -242,7 +242,17 @@ class Peer:
             return
 
         try:
-            if msg_type == MessageType.Headers:
+            if msg_type == MessageType.Header:
+                from mimblewimble.p2p.header_sync import apply_headers_message
+
+                apply_headers_message(
+                    self._adapter,
+                    [body],
+                    peer_addr=self.addr,
+                    peers=self._peer_store,
+                )
+
+            elif msg_type == MessageType.Headers:
                 msg = MsgHeaders.deserialize(body)
                 from mimblewimble.p2p.header_sync import apply_headers_message
 

@@ -130,7 +130,7 @@ def do_handshake_outbound(
         user_agent=shake.user_agent,
         genesis_hash=shake.genesis_hash,
         peer_addr=conn.peer_addr,
-        nonce=shake.nonce,
+        nonce=nonce,
     )
 
 
@@ -167,9 +167,7 @@ def do_handshake_inbound(
     shake = MsgShake(
         version=PROTOCOL_VERSION,
         capabilities=int(Capabilities.FULL_NODE),
-        nonce=nonce,
         genesis_block_difficulty=total_difficulty,
-        receiver_addr=hand.sender_addr,
         user_agent=USER_AGENT,
         genesis_hash=genesis_hash,
     )

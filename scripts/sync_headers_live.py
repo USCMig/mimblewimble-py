@@ -18,7 +18,14 @@ import time
 from dataclasses import dataclass
 from ipaddress import ip_address
 
-from mimblewimble.p2p.message import MAINNET_MAGIC
+from mimblewimble.p2p.message import (
+    MAINNET_MAGIC,
+    Capabilities,
+    MessageType,
+    MsgHand,
+    MsgShake,
+    pack_header,
+)
 
 DEFAULT_GRIN_P2P_ADDR = "127.0.0.1:3414"
 DEFAULT_MY_ADDR = "0.0.0.0:13414"
@@ -133,44 +140,8 @@ def _resolve_sender_addr(remote_addr: str, configured_addr: str) -> str:
     return f"{local_ip}:{port}"
 
 
-def _encode_peer_addr(addr: str) -> bytes:
-    host, port = _parse_addr(addr)
-    try:
-        ip = ip_address(host)
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        except OSError as exc:
-            raise LiveSyncError(f"Cannot resolve host {host!r}: {exc}") from exc
-        if not infos:
-            raise LiveSyncError(f"Cannot resolve host {host!r}: empty result")
-        # Prefer IPv4 if available to match common mainnet peer addresses.
-        chosen = None
-        for family, _, _, _, sockaddr in infos:
-            if family == socket.AF_INET:
-                chosen = sockaddr[0]
-                break
-            if chosen is None:
-                chosen = sockaddr[0]
-        ip = ip_address(chosen)
-
-    if ip.version == 4:
-        return struct.pack(">B", 0) + ip.packed + struct.pack(">H", port)
-
-    segments = ip.exploded.split(":")
-    body = struct.pack(">B", 1)
-    for segment in segments:
-        body += struct.pack(">H", int(segment, 16))
-    body += struct.pack(">H", port)
-    return body
-
-
-def _encode_len_prefixed_bytes(value: bytes) -> bytes:
-    return struct.pack(">Q", len(value)) + value
-
-
 def _pack_grin_message(msg_type: int, body: bytes) -> bytes:
-    return MAINNET_MAGIC + struct.pack(">BQ", msg_type, len(body)) + body
+    return pack_header(MessageType(msg_type), body)
 
 
 def _recv_exact(sock: socket.socket, length: int) -> bytes:
@@ -197,26 +168,27 @@ def _recv_grin_message(sock: socket.socket) -> tuple[int, bytes]:
 
 def _build_hand(sender_addr: str, receiver_addr: str, genesis_hash: bytes) -> bytes:
     nonce = int.from_bytes(os.urandom(8), "big")
-    user_agent = b"MW/mimblewimble-py/0.1.0"
-    body = struct.pack(">IIQQ", 3, CAP_FULL_NODE, nonce, 0)
-    body += _encode_peer_addr(sender_addr)
-    body += _encode_peer_addr(receiver_addr)
-    body += _encode_len_prefixed_bytes(user_agent)
-    body += genesis_hash[:32].ljust(32, b"\x00")
-    return _pack_grin_message(MSG_HAND, body)
+    return MsgHand(
+        capabilities=int(Capabilities.FULL_NODE),
+        nonce=nonce,
+        sender_addr=sender_addr,
+        receiver_addr=receiver_addr,
+        genesis_hash=genesis_hash,
+    ).serialize()
 
 
 def _parse_shake(body: bytes) -> tuple[int, int, int, str, bytes]:
-    if len(body) < 4 + 4 + 8 + 8 + 32:
-        raise LiveSyncError(f"Shake message too short: {len(body)} bytes")
-    version, capabilities, total_difficulty = struct.unpack_from(">IIQ", body, 0)
-    offset = 4 + 4 + 8
-    user_agent_len = struct.unpack_from(">Q", body, offset)[0]
-    offset += 8
-    user_agent = body[offset : offset + user_agent_len].decode("utf-8", "replace")
-    offset += user_agent_len
-    genesis_hash = body[offset : offset + 32]
-    return version, capabilities, total_difficulty, user_agent, genesis_hash
+    try:
+        shake = MsgShake.deserialize(body)
+    except (UnicodeDecodeError, ValueError, struct.error) as exc:
+        raise LiveSyncError(f"Malformed Shake message: {exc}") from exc
+    return (
+        shake.version,
+        shake.capabilities,
+        shake.genesis_block_difficulty,
+        shake.user_agent,
+        shake.genesis_hash,
+    )
 
 
 def _send_get_headers(sock: socket.socket, locator: list[bytes]) -> None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from mimblewimble.p2p.message import MessageType, MsgHeaders
+from mimblewimble.p2p.message import HEADER_LEN, MessageType, MsgHeaders
 
 
 def node_api(method: str, params=None, base_url: str = "http://mocked-node:3413"):
@@ -91,7 +91,7 @@ def test_parse_headers_message_from_mocked_p2p_payload():
     raw_headers = [b"hdr-1", b"hdr-2", b"hdr-3"]
     msg = MsgHeaders(headers=raw_headers)
 
-    message_type, body = MessageType.Headers, msg.serialize()[14:]
+    message_type, body = MessageType.Headers, msg.serialize()[HEADER_LEN:]
     assert message_type == MessageType.Headers
 
     parsed = MsgHeaders.deserialize(body)

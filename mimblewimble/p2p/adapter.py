@@ -13,7 +13,9 @@ Reference: p2p/src/types.rs (ChainAdapter trait in Grin)
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
+
+from mimblewimble.mmr.segment import SegmentType
 
 
 class ChainAdapter(ABC):
@@ -85,6 +87,14 @@ class ChainAdapter(ABC):
     # ------------------------------------------------------------------
     # PIBD segments
     # ------------------------------------------------------------------
+
+    def set_pibd_segment_handler(
+        self, handler: Optional[Callable[[SegmentType, bytes, object], None]]
+    ) -> None:
+        """Register the active PIBD segment consumer.
+
+        Adapters without a StateSync integration may ignore this hook.
+        """
 
     @abstractmethod
     def receive_bitmap_segment(self, block_hash: bytes, segment) -> None:
