@@ -22,12 +22,14 @@ from enum import IntEnum
 from ipaddress import ip_address
 from typing import List, Optional, Tuple
 
+from mimblewimble.blockchain import BlockHeader
 from mimblewimble.mmr.segment import (
     Segment,
     SegmentIdentifier,
     SegmentType,
     SegmentTypeIdentifier,
 )
+from mimblewimble.serializer import Serializer
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -450,28 +452,49 @@ class MsgGetHeaders:
 
 @dataclass
 class MsgHeaders:
-    """Response containing serialised block headers."""
+    """Response containing consecutively serialised block headers.
+
+    Grin encodes a big-endian u16 count followed by each ``BlockHeader``
+    directly, without a per-header length prefix.
+    """
 
     msg_type = MessageType.Headers
     # Each entry is the raw serialised bytes of a BlockHeader
     headers: List[bytes] = field(default_factory=list)
 
     def serialize(self) -> bytes:
-        body = struct.pack("<I", len(self.headers))
+        if len(self.headers) > MAX_HEADERS:
+            raise ValueError(f"Header count exceeds limit: {len(self.headers)}")
+        body = struct.pack(">H", len(self.headers))
         for h in self.headers:
-            body += struct.pack("<I", len(h)) + h
+            body += h
         return pack_header(self.msg_type, body)
 
     @classmethod
     def deserialize(cls, body: bytes) -> "MsgHeaders":
-        (n,) = struct.unpack_from("<I", body)
-        offset = 4
+        if len(body) < 2:
+            raise ValueError("Headers message is missing its count")
+        (n,) = struct.unpack_from(">H", body)
+        if n > MAX_HEADERS:
+            raise ValueError(f"Header count exceeds limit: {n}")
+        payload = body[2:]
+        serializer = Serializer()
+        serializer.write(payload)
         headers = []
-        for _ in range(min(n, MAX_HEADERS)):
-            (hlen,) = struct.unpack_from("<I", body, offset)
-            offset += 4
-            headers.append(body[offset : offset + hlen])
-            offset += hlen
+        for _ in range(n):
+            offset = serializer.pnt
+            try:
+                header = BlockHeader.deserialize(serializer)
+            except (IndexError, ValueError, OverflowError) as exc:
+                raise ValueError("Malformed serialised block header") from exc
+            raw_header = payload[offset : serializer.pnt]
+            check = Serializer()
+            header.serialize(check)
+            if check.getvalue() != raw_header:
+                raise ValueError("Malformed serialised block header")
+            headers.append(raw_header)
+        if serializer.pnt != len(payload):
+            raise ValueError("Headers message contains trailing bytes")
         return cls(headers=headers)
 
 
@@ -666,11 +689,22 @@ def _make_segment_response(
     return pack_header(msg_type, body)
 
 
-def _parse_segment_response(body: bytes) -> Tuple[bytes, Segment]:
+def _parse_segment_response(body: bytes) -> Tuple[bytes, Optional[Segment]]:
     """Parse a XxxSegment response body."""
+    if len(body) < 32:
+        raise ValueError("Segment response is missing its block hash")
     block_hash = body[:32]
+    if len(body) == 32:
+        return block_hash, None
+    if len(body) < 36:
+        raise ValueError("Segment response is missing its segment length")
     (seg_len,) = struct.unpack_from("<I", body, 32)
-    segment = Segment.deserialize(body[36 : 36 + seg_len])
+    end = 36 + seg_len
+    if len(body) < end:
+        raise ValueError("Segment response is truncated")
+    if len(body) > end:
+        raise ValueError("Segment response has trailing bytes")
+    segment = Segment.deserialize(body[36:end]) if seg_len else None
     return block_hash, segment
 
 

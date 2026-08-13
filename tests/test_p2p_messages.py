@@ -13,6 +13,7 @@ Mirrors the p2p round-trip tests in:
 import struct
 import pytest
 
+from mimblewimble.genesis import mainnet
 from mimblewimble.p2p.message import (
     MAINNET_MAGIC,
     TESTNET_MAGIC,
@@ -41,7 +42,27 @@ from mimblewimble.p2p.message import (
     MsgTxHashSetArchive,
     MsgBanReason,
     MsgCompactBlock,
+    MsgOutputSegment,
+    MsgRangeProofSegment,
+    MsgKernelSegment,
 )
+from mimblewimble.serializer import Serializer
+
+
+@pytest.mark.parametrize(
+    "message_type",
+    [MsgOutputSegment, MsgRangeProofSegment, MsgKernelSegment],
+)
+def test_empty_segment_response_roundtrip(message_type):
+    block_hash = bytes.fromhex("ab" * 32)
+    message = message_type(block_hash=block_hash)
+    _, msg_type, body_length = unpack_header(message.serialize())
+    body = message.serialize()[-body_length:]
+
+    assert msg_type == message.msg_type
+    parsed = message_type.deserialize(body)
+    assert parsed.block_hash == block_hash
+    assert parsed.segment is None
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +400,32 @@ class TestMsgGetHeaders:
 
     def test_msg_type(self):
         assert MsgGetHeaders.msg_type == MessageType.GetHeaders
+
+
+class TestMsgHeaders:
+    @staticmethod
+    def _serialized_header() -> bytes:
+        serializer = Serializer()
+        mainnet.getHeader().serialize(serializer)
+        return serializer.getvalue()
+
+    def test_wire_layout_is_big_endian_count_followed_by_headers(self):
+        raw_header = self._serialized_header()
+        body = _body_of(MsgHeaders(headers=[raw_header]).serialize())
+
+        assert body == b"\x00\x01" + raw_header
+
+    def test_multiple_headers_are_concatenated_without_length_prefixes(self):
+        raw_header = self._serialized_header()
+        body = _body_of(MsgHeaders(headers=[raw_header, raw_header]).serialize())
+
+        assert body == b"\x00\x02" + raw_header + raw_header
+        assert MsgHeaders.deserialize(body).headers == [raw_header, raw_header]
+
+    def test_truncated_header_is_rejected(self):
+        raw_header = self._serialized_header()
+        with pytest.raises(ValueError, match="Malformed serialised block header"):
+            MsgHeaders.deserialize(b"\x00\x01" + raw_header[:-1])
 
 
 class TestMsgGetBlock:

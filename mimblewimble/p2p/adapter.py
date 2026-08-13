@@ -13,7 +13,7 @@ Reference: p2p/src/types.rs (ChainAdapter trait in Grin)
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, List, Optional, Tuple
+from typing import BinaryIO, Callable, List, Optional, Tuple
 
 from mimblewimble.mmr.segment import SegmentType
 
@@ -83,6 +83,16 @@ class ChainAdapter(ABC):
 
         Returns True if the ZIP was accepted and the chain state updated.
         """
+
+    def txhashset_write_stream(
+        self,
+        block_hash: bytes,
+        height: int,
+        archive: BinaryIO,
+        size: int,
+    ) -> bool:
+        """Consume a streamed TxHashSet archive without buffering it in memory."""
+        return self.txhashset_write(block_hash, height, archive.read())
 
     # ------------------------------------------------------------------
     # PIBD segments

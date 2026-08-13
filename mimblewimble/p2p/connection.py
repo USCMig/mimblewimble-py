@@ -15,7 +15,7 @@ import errno
 import logging
 import socket
 import struct
-from typing import Optional, Tuple
+from typing import BinaryIO, Optional, Tuple
 
 from mimblewimble.p2p.message import (
     HEADER_LEN,
@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 
 # Maximum allowed body size (32 MiB) — prevent memory exhaustion
 MAX_BODY_BYTES: int = 32 * 1024 * 1024
+# Maximum TxHashSet archive attachment size accepted by the streaming path.
+MAX_ATTACHMENT_BYTES: int = 2 * 1024 * 1024 * 1024
 
 # Default connect / IO timeout in seconds
 DEFAULT_TIMEOUT: float = 30.0
@@ -134,6 +136,62 @@ class Connection:
         )
         return msg_type, bytes(body)
 
+    def recv_message_with_attachment(self) -> Tuple[MessageType, bytes, bytes]:
+        """Receive a message and its TxHashSet archive attachment, if present.
+
+        Grin sends ``TxHashSetArchive`` metadata in the framed message body,
+        followed immediately by the declared archive bytes outside that frame.
+        Reading both together prevents the attachment from being mistaken for
+        the next P2P frame.
+        """
+        msg_type, body = self.recv_message()
+        if msg_type != MessageType.TxHashSetArchive:
+            return msg_type, body, b""
+        if len(body) != 48:
+            raise ConnectionError(
+                f"Invalid TxHashSetArchive metadata length: {len(body)}"
+            )
+
+        attachment_len = struct.unpack_from(">Q", body, 40)[0]
+        if attachment_len > MAX_ATTACHMENT_BYTES:
+            raise ConnectionError(
+                f"Attachment too large: {attachment_len} > {MAX_ATTACHMENT_BYTES}"
+            )
+        return msg_type, body, bytes(self._recv_exactly(attachment_len))
+
+    def recv_message_with_attachment_to(
+        self, sink: BinaryIO, chunk_size: int = 64 * 1024
+    ) -> Tuple[MessageType, bytes, int]:
+        """Receive a message and stream its archive attachment into *sink*.
+
+        Returns the message type, framed body, and number of attachment bytes
+        written. Non-archive messages return an attachment size of zero.
+        """
+        msg_type, body = self.recv_message()
+        if msg_type != MessageType.TxHashSetArchive:
+            return msg_type, body, 0
+        if len(body) != 48:
+            raise ConnectionError(
+                f"Invalid TxHashSetArchive metadata length: {len(body)}"
+            )
+
+        attachment_len = struct.unpack_from(">Q", body, 40)[0]
+        if attachment_len > MAX_ATTACHMENT_BYTES:
+            raise ConnectionError(
+                f"Attachment too large: {attachment_len} > {MAX_ATTACHMENT_BYTES}"
+            )
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        remaining = attachment_len
+        written = 0
+        while remaining:
+            chunk = self._recv_chunk(min(chunk_size, remaining))
+            sink.write(chunk)
+            written += len(chunk)
+            remaining -= len(chunk)
+        return msg_type, body, written
+
     def recv_message_nonblocking(self) -> Optional[Tuple[MessageType, bytes]]:
         """Return a message if one is buffered; otherwise return None.
 
@@ -219,6 +277,23 @@ class Connection:
                 raise ConnectionError("Peer closed connection unexpectedly")
             result.extend(chunk)
         return result
+
+    def _recv_chunk(self, n: int) -> bytes:
+        """Read up to *n* bytes, consuming buffered data first."""
+        if self._buf:
+            take = min(n, len(self._buf))
+            chunk = bytes(self._buf[:take])
+            del self._buf[:take]
+            return chunk
+        try:
+            chunk = self._sock.recv(n)
+        except OSError as e:
+            self.closed = True
+            raise ConnectionError(f"Recv failed: {e}") from e
+        if not chunk:
+            self.closed = True
+            raise ConnectionError("Peer closed connection unexpectedly")
+        return chunk
 
     def __repr__(self) -> str:
         return f"Connection(peer={self.peer_addr!r}, closed={self.closed})"

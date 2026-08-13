@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, List, Optional
+from typing import BinaryIO, Callable, List, Optional
 
 from mimblewimble.blockchain import (
     BlockHeader,
@@ -200,6 +200,22 @@ class ConcreteChainAdapter(ChainAdapter):
             block_hash.hex()[:12],
             height,
             len(zip_bytes),
+        )
+        return True
+
+    def txhashset_write_stream(
+        self,
+        block_hash: bytes,
+        height: int,
+        archive: BinaryIO,
+        size: int,
+    ) -> bool:
+        """Accept streamed archive metadata without copying it into memory."""
+        log.debug(
+            "txhashset_write_stream: hash=%s height=%d size=%d",
+            block_hash.hex()[:12],
+            height,
+            size,
         )
         return True
 
