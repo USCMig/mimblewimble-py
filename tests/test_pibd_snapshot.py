@@ -146,6 +146,7 @@ def test_streamed_snapshot_is_validated_from_disk_and_cleaned_up(tmp_path):
     assert txhs.output_pmmr.root() == out_root
     assert txhs.rangeproof_pmmr.root() == rp_root
     assert txhs.kernel_mmr.root() == kern_root
+    assert state_sync._sync_state.status.name == "BODY_SYNC"
     txhs.close()
 
 

@@ -347,7 +347,7 @@ class StateSync:
 
         header = self._archive_header
         try:
-            return self.apply_snapshot_path(
+            applied = self.apply_snapshot_path(
                 block_hash,
                 height,
                 archive_path,
@@ -355,6 +355,10 @@ class StateSync:
                 header.getRangeProofRoot(),
                 header.getKernelRoot(),
             )
+            if applied:
+                self._sync_state.update(SyncStatus.BODY_SYNC)
+                log.info("StateSync: snapshot sync complete — transitioning to body sync")
+            return applied
         finally:
             archive_path.unlink(missing_ok=True)
 
