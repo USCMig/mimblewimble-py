@@ -1,3 +1,5 @@
+from io import BytesIO
+
 from mimblewimble.mmr.segment import SegmentType
 from mimblewimble.blockchain import BlockHeader, ProofOfWork
 from mimblewimble.models.transaction import BlindingFactor
@@ -27,6 +29,25 @@ def test_adapter_forwards_pibd_segments_to_active_handler():
         (SegmentType.RANGEPROOF, block_hash, "rangeproof"),
         (SegmentType.KERNEL, block_hash, "kernel"),
     ]
+
+
+def test_adapter_forwards_streamed_txhashset_to_active_handler():
+    adapter = ConcreteChainAdapter(genesis_hash=b"\x00" * 32)
+    received = []
+    block_hash = b"\x02" * 32
+    archive = b"zip-payload"
+
+    adapter.set_txhashset_stream_handler(
+        lambda received_hash, height, stream, size: received.append(
+            (received_hash, height, stream.read(), size)
+        )
+        or True
+    )
+
+    assert adapter.txhashset_write_stream(
+        block_hash, 7, BytesIO(archive), len(archive)
+    )
+    assert received == [(block_hash, 7, archive, len(archive))]
 
 
 def _make_header(height: int, total_difficulty: int) -> BlockHeader:

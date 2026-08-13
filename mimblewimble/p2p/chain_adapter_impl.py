@@ -75,6 +75,9 @@ class ConcreteChainAdapter(ChainAdapter):
         self._pibd_segment_handler: Optional[
             Callable[[SegmentType, bytes, object], None]
         ] = None
+        self._txhashset_stream_handler: Optional[
+            Callable[[bytes, int, BinaryIO, int], bool]
+        ] = None
 
         best_header = self._db.get_best_header()
         if best_header is not None:
@@ -210,7 +213,11 @@ class ConcreteChainAdapter(ChainAdapter):
         archive: BinaryIO,
         size: int,
     ) -> bool:
-        """Accept streamed archive metadata without copying it into memory."""
+        """Forward a streamed archive to the active StateSync consumer."""
+        with self._lock:
+            handler = self._txhashset_stream_handler
+        if handler is not None:
+            return handler(block_hash, height, archive, size)
         log.debug(
             "txhashset_write_stream: hash=%s height=%d size=%d",
             block_hash.hex()[:12],
@@ -218,6 +225,12 @@ class ConcreteChainAdapter(ChainAdapter):
             size,
         )
         return True
+
+    def set_txhashset_stream_handler(
+        self, handler: Optional[Callable[[bytes, int, BinaryIO, int], bool]]
+    ) -> None:
+        with self._lock:
+            self._txhashset_stream_handler = handler
 
     # ------------------------------------------------------------------
     # PIBD segments  (delegated to the TxHashSet / Desegmenter layer)

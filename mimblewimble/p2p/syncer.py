@@ -189,6 +189,9 @@ class SyncRunner:
                 data_dir=self._data_dir,
             )
             self._adapter.set_pibd_segment_handler(self._state_sync.receive_segment)
+            self._adapter.set_txhashset_stream_handler(
+                self._state_sync.receive_txhashset_stream
+            )
 
         archive_hash = (
             self._archive_header.getHash()

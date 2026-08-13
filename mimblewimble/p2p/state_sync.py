@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -323,6 +324,75 @@ class StateSync:
         # Move validated txhashset data into the live txhashset dir
         # (caller is responsible for this swap; we just confirm validity)
         return True
+
+    def receive_txhashset_stream(
+        self, block_hash: bytes, height: int, archive, size: int
+    ) -> bool:
+        """Persist and validate a streamed archive from the P2P receive loop."""
+        if self._archive_header is None:
+            log.warning("StateSync: received archive before header initialization")
+            return False
+
+        archive_path = self._data_dir / f"_snapshot_{block_hash.hex()[:16]}.zip"
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        with archive_path.open("wb") as destination:
+            shutil.copyfileobj(archive, destination, length=1 << 20)
+        written_size = archive_path.stat().st_size
+        if written_size != size:
+            archive_path.unlink(missing_ok=True)
+            raise StateSyncError(
+                f"TxHashSet archive size mismatch: expected {size}, "
+                f"wrote {written_size}"
+            )
+
+        header = self._archive_header
+        try:
+            return self.apply_snapshot_path(
+                block_hash,
+                height,
+                archive_path,
+                header.getOutputRoot(),
+                header.getRangeProofRoot(),
+                header.getKernelRoot(),
+            )
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    def apply_snapshot_path(
+        self,
+        block_hash: bytes,
+        height: int,
+        zip_path: Path,
+        expected_output_root: bytes,
+        expected_rangeproof_root: bytes,
+        expected_kernel_root: bytes,
+    ) -> bool:
+        """Validate a TxHashSet ZIP from disk without loading it into memory."""
+        tmp_dir = self._data_dir / f"_snapshot_{block_hash.hex()[:16]}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            TxHashSetSync.extract(zip_path, tmp_dir)
+            tmp_txhs = TxHashSet(tmp_dir)
+            try:
+                roots = (
+                    tmp_txhs.output_pmmr.root(),
+                    tmp_txhs.rangeproof_pmmr.root(),
+                    tmp_txhs.kernel_mmr.root(),
+                )
+            finally:
+                tmp_txhs.close()
+            expected = (
+                expected_output_root,
+                expected_rangeproof_root,
+                expected_kernel_root,
+            )
+            if roots != expected:
+                raise StateSyncError("Snapshot PMMR roots do not match archive header")
+            self._txhashset.replace_directory(tmp_dir)
+            log.info("StateSync: validated snapshot promoted to live TxHashSet")
+            return True
+        except (TxHashSetError, zipfile.BadZipFile, OSError, ValueError) as exc:
+            raise StateSyncError(f"Failed to validate snapshot ZIP: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Segment delivery callbacks (called from peer dispatch)

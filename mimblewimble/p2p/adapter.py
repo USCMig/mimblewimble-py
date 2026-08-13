@@ -94,6 +94,11 @@ class ChainAdapter(ABC):
         """Consume a streamed TxHashSet archive without buffering it in memory."""
         return self.txhashset_write(block_hash, height, archive.read())
 
+    def set_txhashset_stream_handler(
+        self, handler: Optional[Callable[[bytes, int, BinaryIO, int], bool]]
+    ) -> None:
+        """Register the active streamed TxHashSet archive consumer."""
+
     # ------------------------------------------------------------------
     # PIBD segments
     # ------------------------------------------------------------------
