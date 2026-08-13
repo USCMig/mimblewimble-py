@@ -78,6 +78,7 @@ class ConcreteChainAdapter(ChainAdapter):
         self._txhashset_stream_handler: Optional[
             Callable[[bytes, int, BinaryIO, int], bool]
         ] = None
+        self._body_sync_handler: Optional[Callable[[str], None]] = None
 
         best_header = self._db.get_best_header()
         if best_header is not None:
@@ -232,6 +233,10 @@ class ConcreteChainAdapter(ChainAdapter):
         with self._lock:
             self._txhashset_stream_handler = handler
 
+    def set_body_sync_handler(self, handler: Optional[Callable[[str], None]]) -> None:
+        with self._lock:
+            self._body_sync_handler = handler
+
     # ------------------------------------------------------------------
     # PIBD segments  (delegated to the TxHashSet / Desegmenter layer)
     # ------------------------------------------------------------------
@@ -311,6 +316,10 @@ class ConcreteChainAdapter(ChainAdapter):
         log.debug(
             "handle_block: accepted h=%d hash=%s", block.getHeight(), hash_hex[:12]
         )
+        with self._lock:
+            body_sync_handler = self._body_sync_handler
+        if body_sync_handler is not None:
+            body_sync_handler(hash_hex)
         return True
 
     # ------------------------------------------------------------------

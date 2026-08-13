@@ -219,6 +219,7 @@ class SyncRunner:
                 start_height=1,
                 end_height=end_height,
             )
+            self._adapter.set_body_sync_handler(self._body_sync.on_block_received)
             log.info("SyncRunner: BodySync initialised for heights 1–%d", end_height)
 
         if self._body_sync.is_complete():

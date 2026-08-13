@@ -99,6 +99,9 @@ class ChainAdapter(ABC):
     ) -> None:
         """Register the active streamed TxHashSet archive consumer."""
 
+    def set_body_sync_handler(self, handler: Optional[Callable[[str], None]]) -> None:
+        """Register the active body-sync completion callback."""
+
     # ------------------------------------------------------------------
     # PIBD segments
     # ------------------------------------------------------------------
@@ -201,6 +204,9 @@ class NoopChainAdapter(ChainAdapter):
 
     def txhashset_write(self, block_hash: bytes, height: int, zip_bytes: bytes) -> bool:
         return False
+
+    def set_body_sync_handler(self, handler: Optional[Callable[[str], None]]) -> None:
+        pass
 
     def receive_bitmap_segment(self, block_hash: bytes, segment) -> None:
         pass
