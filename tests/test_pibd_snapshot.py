@@ -126,6 +126,30 @@ def test_snapshot_accepted_with_correct_roots(tmp_path):
     txhs.close()
 
 
+def test_snapshot_rejected_with_wrong_mmr_size(tmp_path):
+    src_dir = tmp_path / "size_src"
+    src_dir.mkdir()
+    zip_bytes, out_root, rp_root, kern_root = build_and_zip_txhashset(
+        src_dir, n_outputs=2, n_kernels=1
+    )
+
+    txhs = TxHashSet(tmp_path / "size_live")
+    state_sync = _make_state_sync(tmp_path, txhs)
+
+    with pytest.raises(StateSyncError, match="output MMR size mismatch"):
+        state_sync.apply_snapshot(
+            block_hash=b"\xab" * 32,
+            height=1,
+            zip_bytes=zip_bytes,
+            expected_output_root=out_root,
+            expected_rangeproof_root=rp_root,
+            expected_kernel_root=kern_root,
+            expected_output_mmr_size=1,
+            expected_kernel_mmr_size=1,
+        )
+    txhs.close()
+
+
 def test_streamed_snapshot_is_validated_from_disk_and_cleaned_up(tmp_path):
     src_dir = tmp_path / "stream_src"
     src_dir.mkdir()
