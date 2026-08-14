@@ -88,7 +88,12 @@ def test_get_header_uses_mocked_jsonrpc(monkeypatch):
 
 
 def test_parse_headers_message_from_mocked_p2p_payload():
-    raw_headers = [b"hdr-1", b"hdr-2", b"hdr-3"]
+    from mimblewimble.genesis import mainnet
+    from mimblewimble.serializer import Serializer
+
+    serializer = Serializer()
+    mainnet.getHeader().serialize(serializer)
+    raw_headers = [serializer.getvalue()]
     msg = MsgHeaders(headers=raw_headers)
 
     message_type, body = MessageType.Headers, msg.serialize()[HEADER_LEN:]

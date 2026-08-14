@@ -55,13 +55,23 @@ def build_and_zip_txhashset(tmp_dir: Path, n_outputs: int, n_kernels: int):
 
 
 class _FakeHeader:
-    def __init__(self, output_mmr_size, kernel_mmr_size):
+    def __init__(self, output_mmr_size, kernel_mmr_size, roots=None):
         self.height = 1
         self.outputMMRSize = output_mmr_size
         self.kernelMMRSize = kernel_mmr_size
+        self._roots = roots or (b"\x00" * 32,) * 3
 
     def getHash(self):
         return b"\xab" * 32
+
+    def getOutputRoot(self):
+        return self._roots[0]
+
+    def getRangeProofRoot(self):
+        return self._roots[1]
+
+    def getKernelRoot(self):
+        return self._roots[2]
 
 
 def _build_txhashset_zip_bytes(txhs_dir: Path) -> bytes:
@@ -109,9 +119,93 @@ def test_snapshot_accepted_with_correct_roots(tmp_path):
     assert result is True
     snapshot_dir = tmp_path / "data" / f"_snapshot_{'ab' * 8}"
     assert not (snapshot_dir / "snapshot.zip").exists()
-    assert len(state_sync._peers.stored_blocks) == 1
-    assert state_sync._peers.stored_blocks[0].hash_hex == (b"\xab" * 32).hex()
-    assert len(state_sync._peers.stored_outputs) > 0
+    peers = cast(Any, state_sync._peers)
+    assert len(peers.stored_blocks) == 1
+    assert peers.stored_blocks[0].hash_hex == (b"\xab" * 32).hex()
+    assert len(peers.stored_outputs) > 0
+    txhs.close()
+
+
+def test_snapshot_rejected_with_wrong_mmr_size(tmp_path):
+    src_dir = tmp_path / "size_src"
+    src_dir.mkdir()
+    zip_bytes, out_root, rp_root, kern_root = build_and_zip_txhashset(
+        src_dir, n_outputs=2, n_kernels=1
+    )
+
+    txhs = TxHashSet(tmp_path / "size_live")
+    state_sync = _make_state_sync(tmp_path, txhs)
+
+    with pytest.raises(StateSyncError, match="output MMR size mismatch"):
+        state_sync.apply_snapshot(
+            block_hash=b"\xab" * 32,
+            height=1,
+            zip_bytes=zip_bytes,
+            expected_output_root=out_root,
+            expected_rangeproof_root=rp_root,
+            expected_kernel_root=kern_root,
+            expected_output_mmr_size=1,
+            expected_kernel_mmr_size=1,
+        )
+    txhs.close()
+
+
+def test_streamed_snapshot_is_validated_from_disk_and_cleaned_up(tmp_path):
+    src_dir = tmp_path / "stream_src"
+    src_dir.mkdir()
+    zip_bytes, out_root, rp_root, kern_root = build_and_zip_txhashset(
+        src_dir, n_outputs=2, n_kernels=1
+    )
+
+    txhs = TxHashSet(tmp_path / "stream_live")
+    state_sync = _make_state_sync(tmp_path, txhs)
+    state_sync._archive_header = _FakeHeader(
+        txhs.output_pmmr.size(), txhs.kernel_mmr.size(), (out_root, rp_root, kern_root)
+    )
+
+    assert state_sync.receive_txhashset_stream(
+        b"\xab" * 32, 1, io.BytesIO(zip_bytes), len(zip_bytes)
+    )
+    assert not (tmp_path / "data" / "_snapshot_abababababababab.zip").exists()
+    assert txhs.output_pmmr.root() == out_root
+    assert txhs.rangeproof_pmmr.root() == rp_root
+    assert txhs.kernel_mmr.root() == kern_root
+    assert state_sync._sync_state.status.name == "BODY_SYNC"
+    txhs.close()
+
+
+def test_streamed_snapshot_root_mismatch_preserves_live_state(tmp_path):
+    src_dir = tmp_path / "mismatch_src"
+    src_dir.mkdir()
+    zip_bytes, out_root, rp_root, kern_root = build_and_zip_txhashset(
+        src_dir, n_outputs=2, n_kernels=1
+    )
+
+    txhs = TxHashSet(tmp_path / "mismatch_live")
+    txhs.output_pmmr.push(b"l" * 33)
+    txhs.rangeproof_pmmr.push(b"r" * 32)
+    txhs.kernel_mmr.push(b"k" * 32)
+    txhs.flush()
+    live_roots = (
+        txhs.output_pmmr.root(),
+        txhs.rangeproof_pmmr.root(),
+        txhs.kernel_mmr.root(),
+    )
+    state_sync = _make_state_sync(tmp_path, txhs)
+    state_sync._archive_header = _FakeHeader(
+        txhs.output_pmmr.size(), txhs.kernel_mmr.size(), (b"\xff" * 32, rp_root, kern_root)
+    )
+
+    with pytest.raises(StateSyncError, match="Snapshot PMMR roots"):
+        state_sync.receive_txhashset_stream(
+            b"\xab" * 32, 1, io.BytesIO(zip_bytes), len(zip_bytes)
+        )
+
+    assert (
+        txhs.output_pmmr.root(),
+        txhs.rangeproof_pmmr.root(),
+        txhs.kernel_mmr.root(),
+    ) == live_roots
     txhs.close()
 
 

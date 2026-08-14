@@ -1,10 +1,16 @@
 import socket
 import struct
 import threading
+from io import BytesIO
 
 import pytest
 
-from mimblewimble.p2p.connection import Connection, ConnectionError, MAX_BODY_BYTES
+from mimblewimble.p2p.connection import (
+    Connection,
+    ConnectionError,
+    MAX_ATTACHMENT_BYTES,
+    MAX_BODY_BYTES,
+)
 from mimblewimble.p2p.message import MAINNET_MAGIC, MessageType, pack_header
 
 
@@ -109,6 +115,61 @@ def test_recv_message_nonblocking_rejects_invalid_message_type():
 
         with pytest.raises(ConnectionError, match="Invalid message header"):
             conn.recv_message_nonblocking()
+    finally:
+        conn.close()
+        peer.close()
+
+
+def test_recv_message_with_attachment_preserves_next_message_boundary():
+    conn, peer = _socket_pair_connection()
+    try:
+        archive = b"PK\x03\x04archive"
+        metadata = b"\x11" * 32 + struct.pack(">QQ", 42, len(archive))
+        peer.sendall(pack_header(MessageType.TxHashSetArchive, metadata) + archive)
+        peer.sendall(pack_header(MessageType.Ping, b""))
+
+        msg_type, body, attachment = conn.recv_message_with_attachment()
+
+        assert msg_type == MessageType.TxHashSetArchive
+        assert body == metadata
+        assert attachment == archive
+        assert conn.recv_message() == (MessageType.Ping, b"")
+    finally:
+        conn.close()
+        peer.close()
+
+
+def test_recv_message_with_attachment_rejects_oversized_archive():
+    conn, peer = _socket_pair_connection()
+    try:
+        metadata = b"\x22" * 32 + struct.pack(">QQ", 42, MAX_ATTACHMENT_BYTES + 1)
+        peer.sendall(pack_header(MessageType.TxHashSetArchive, metadata))
+
+        with pytest.raises(ConnectionError, match="Attachment too large"):
+            conn.recv_message_with_attachment()
+    finally:
+        conn.close()
+        peer.close()
+
+
+def test_recv_message_with_attachment_streams_to_sink_and_preserves_boundary():
+    conn, peer = _socket_pair_connection()
+    try:
+        archive = b"archive-bytes" * 10000
+        metadata = b"\x44" * 32 + struct.pack(">QQ", 7, len(archive))
+        peer.sendall(pack_header(MessageType.TxHashSetArchive, metadata) + archive)
+        peer.sendall(pack_header(MessageType.Pong, b""))
+        sink = BytesIO()
+
+        msg_type, body, written = conn.recv_message_with_attachment_to(
+            sink, chunk_size=31
+        )
+
+        assert msg_type == MessageType.TxHashSetArchive
+        assert body == metadata
+        assert written == len(archive)
+        assert sink.getvalue() == archive
+        assert conn.recv_message() == (MessageType.Pong, b"")
     finally:
         conn.close()
         peer.close()

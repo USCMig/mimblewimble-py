@@ -189,6 +189,9 @@ class SyncRunner:
                 data_dir=self._data_dir,
             )
             self._adapter.set_pibd_segment_handler(self._state_sync.receive_segment)
+            self._adapter.set_txhashset_stream_handler(
+                self._state_sync.receive_txhashset_stream
+            )
 
         archive_hash = (
             self._archive_header.getHash()
@@ -216,6 +219,7 @@ class SyncRunner:
                 start_height=1,
                 end_height=end_height,
             )
+            self._adapter.set_body_sync_handler(self._body_sync.on_block_received)
             log.info("SyncRunner: BodySync initialised for heights 1–%d", end_height)
 
         if self._body_sync.is_complete():

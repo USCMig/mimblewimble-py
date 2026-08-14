@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import time
 from io import BytesIO
 from pathlib import Path
@@ -975,6 +977,44 @@ class TxHashSet:
         self.output_pmmr.close()
         self.rangeproof_pmmr.close()
         self.kernel_mmr.close()
+
+    def replace_directory(self, source_dir: Path) -> None:
+        """Replace this TxHashSet with a validated directory and reopen it."""
+        source_dir = Path(source_dir)
+        if not source_dir.is_dir():
+            raise TxHashSetError(f"TxHashSet source directory is missing: {source_dir}")
+        if source_dir.resolve() == self._dir.resolve():
+            return
+
+        backup_dir = self._dir.with_name(f"{self._dir.name}.backup")
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+
+        self.close()
+        moved_old = False
+        try:
+            if self._dir.exists():
+                os.replace(self._dir, backup_dir)
+                moved_old = True
+            os.replace(source_dir, self._dir)
+            reopened = TxHashSet(self._dir)
+            self.output_pmmr = reopened.output_pmmr
+            self.rangeproof_pmmr = reopened.rangeproof_pmmr
+            self.kernel_mmr = reopened.kernel_mmr
+            self._commit_to_pos = reopened._commit_to_pos
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+        except Exception:
+            if self._dir.exists() and not moved_old:
+                shutil.rmtree(self._dir)
+            if moved_old and backup_dir.exists() and not self._dir.exists():
+                os.replace(backup_dir, self._dir)
+            reopened = TxHashSet(self._dir)
+            self.output_pmmr = reopened.output_pmmr
+            self.rangeproof_pmmr = reopened.rangeproof_pmmr
+            self.kernel_mmr = reopened.kernel_mmr
+            self._commit_to_pos = reopened._commit_to_pos
+            raise
 
     def _save_commit_idx(self) -> None:
         idx_path = self._dir / self._COMMIT_IDX_FILE

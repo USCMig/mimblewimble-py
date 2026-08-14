@@ -13,9 +13,10 @@ Reference: p2p/src/peer.rs
 from __future__ import annotations
 
 import logging
+import tempfile
 import threading
 import time
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import BinaryIO, TYPE_CHECKING, Callable, List, Optional, cast
 
 from mimblewimble.p2p.adapter import ChainAdapter
 from mimblewimble.p2p.connection import Connection, ConnectionError
@@ -221,7 +222,19 @@ class Peer:
         """Background thread: read and dispatch incoming messages."""
         while self._running:
             try:
-                msg_type, body = self._conn.recv_message()
+                with tempfile.TemporaryFile() as attachment_sink:
+                    msg_type, body, attachment_size = (
+                        self._conn.recv_message_with_attachment_to(
+                            cast(BinaryIO, attachment_sink)
+                        )
+                    )
+                    if msg_type == MessageType.TxHashSetArchive:
+                        attachment_sink.seek(0)
+                        attachment: BinaryIO | bytes = cast(BinaryIO, attachment_sink)
+                    else:
+                        attachment = b""
+                    self._last_seen = time.monotonic()
+                    self._dispatch(msg_type, body, attachment, attachment_size)
             except ConnectionError as e:
                 log.info("Peer %s disconnected: %s", self.addr, e)
                 self._running = False
@@ -231,12 +244,15 @@ class Peer:
                 self._running = False
                 break
 
-            self._last_seen = time.monotonic()
-            self._dispatch(msg_type, body)
-
         self._conn.close()
 
-    def _dispatch(self, msg_type: MessageType, body: bytes) -> None:
+    def _dispatch(
+        self,
+        msg_type: MessageType,
+        body: bytes,
+        attachment: bytes | BinaryIO = b"",
+        attachment_size: int = 0,
+    ) -> None:
         """Route an incoming message to the adapter."""
         if self._adapter is None:
             return
@@ -265,7 +281,14 @@ class Peer:
 
             elif msg_type == MessageType.TxHashSetArchive:
                 msg = MsgTxHashSetArchive.deserialize(body)
-                self._adapter.txhashset_write(msg.block_hash, msg.height, msg.zip_bytes)
+                if not isinstance(attachment, bytes):
+                    self._adapter.txhashset_write_stream(
+                        msg.block_hash, msg.height, attachment, attachment_size
+                    )
+                else:
+                    self._adapter.txhashset_write(
+                        msg.block_hash, msg.height, attachment
+                    )
 
             elif msg_type == MessageType.OutputBitmapSegment:
                 msg = MsgOutputBitmapSegment.deserialize(body)

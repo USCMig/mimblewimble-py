@@ -13,7 +13,7 @@ Reference: p2p/src/types.rs (ChainAdapter trait in Grin)
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, List, Optional, Tuple
+from typing import BinaryIO, Callable, List, Optional, Tuple
 
 from mimblewimble.mmr.segment import SegmentType
 
@@ -83,6 +83,24 @@ class ChainAdapter(ABC):
 
         Returns True if the ZIP was accepted and the chain state updated.
         """
+
+    def txhashset_write_stream(
+        self,
+        block_hash: bytes,
+        height: int,
+        archive: BinaryIO,
+        size: int,
+    ) -> bool:
+        """Consume a streamed TxHashSet archive without buffering it in memory."""
+        return self.txhashset_write(block_hash, height, archive.read())
+
+    def set_txhashset_stream_handler(
+        self, handler: Optional[Callable[[bytes, int, BinaryIO, int], bool]]
+    ) -> None:
+        """Register the active streamed TxHashSet archive consumer."""
+
+    def set_body_sync_handler(self, handler: Optional[Callable[[str], None]]) -> None:
+        """Register the active body-sync completion callback."""
 
     # ------------------------------------------------------------------
     # PIBD segments
@@ -186,6 +204,9 @@ class NoopChainAdapter(ChainAdapter):
 
     def txhashset_write(self, block_hash: bytes, height: int, zip_bytes: bytes) -> bool:
         return False
+
+    def set_body_sync_handler(self, handler: Optional[Callable[[str], None]]) -> None:
+        pass
 
     def receive_bitmap_segment(self, block_hash: bytes, segment) -> None:
         pass

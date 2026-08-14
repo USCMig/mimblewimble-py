@@ -26,6 +26,7 @@ from mimblewimble.p2p.message import (
     MsgShake,
     pack_header,
 )
+from mimblewimble.p2p.connection import Connection
 
 DEFAULT_GRIN_P2P_ADDR = "127.0.0.1:3414"
 DEFAULT_MY_ADDR = "0.0.0.0:13414"
@@ -124,16 +125,18 @@ def _resolve_connect_targets(addr: str) -> list[str]:
 
 def _resolve_sender_addr(remote_addr: str, configured_addr: str) -> str:
     host, port = _parse_addr(configured_addr)
-    if host != "0.0.0.0":
+    if host not in {"0.0.0.0", "::"}:
         return configured_addr
 
     remote_host, remote_port = _parse_addr(remote_addr)
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    remote_ip = ip_address(remote_host.strip("[]"))
+    probe_family = socket.AF_INET6 if remote_ip.version == 6 else socket.AF_INET
+    probe = socket.socket(probe_family, socket.SOCK_DGRAM)
     try:
         probe.connect((remote_host, remote_port))
         local_ip = probe.getsockname()[0]
     except OSError:
-        local_ip = "127.0.0.1"
+        local_ip = "::1" if probe_family == socket.AF_INET6 else "127.0.0.1"
     finally:
         probe.close()
 
@@ -215,9 +218,13 @@ def run_live_header_sync_smoke(
     p2p_addr: str | None = None,
     my_addr: str | None = None,
     require_state_sync: bool = False,
+    txhashset_archive_path: str | None = None,
 ) -> LiveSyncReport:
     requested_target = p2p_addr or os.getenv("GRIN_P2P_ADDR", DEFAULT_GRIN_P2P_ADDR)
     local_addr = my_addr or os.getenv("GRIN_MY_ADDR", DEFAULT_MY_ADDR)
+    archive_path = txhashset_archive_path or os.getenv(
+        "GRIN_TXHASHSET_ARCHIVE_PATH"
+    )
 
     genesis_hash = get_mainnet_genesis_hash()
     sender_addr = _resolve_sender_addr(requested_target, local_addr)
@@ -243,9 +250,10 @@ def run_live_header_sync_smoke(
             f"Unable to connect to any target for {requested_target}: {last_error}"
         )
 
+    connection = Connection.from_socket(sock, peer_addr=selected_target)
     try:
         sock.sendall(_build_hand(sender_addr, selected_target, genesis_hash))
-        msg_type, body = _recv_grin_message(sock)
+        msg_type, body = connection.recv_message()
         if msg_type != MSG_SHAKE:
             raise LiveSyncError(f"Expected Shake ({MSG_SHAKE}), got {msg_type}")
 
@@ -269,7 +277,7 @@ def run_live_header_sync_smoke(
         deadline = time.monotonic() + 30.0
         headers_count = 0
         while time.monotonic() < deadline:
-            msg_type, body = _recv_grin_message(sock)
+            msg_type, body = connection.recv_message()
             if msg_type == MSG_PING and len(body) >= 16:
                 # Echo liveness data back as Pong to remain in good standing.
                 sock.sendall(_pack_grin_message(MSG_PONG, body[:16]))
@@ -311,40 +319,55 @@ def run_live_header_sync_smoke(
         print("Requested TxHashSet archive metadata (state sync probe)")
 
         state_deadline = time.monotonic() + 30.0
-        while time.monotonic() < state_deadline:
-            msg_type, body = _recv_grin_message(sock)
-            if msg_type == MSG_PING and len(body) >= 16:
-                sock.sendall(_pack_grin_message(MSG_PONG, body[:16]))
-                continue
-
-            if msg_type == MSG_TXHASHSET_ARCHIVE:
-                if len(body) < 48:
-                    raise LiveSyncError("Received malformed TxHashSetArchive message")
-                block_hash = body[:32]
-                height = struct.unpack_from(">Q", body, 32)[0]
-                bytes_len = struct.unpack_from(">Q", body, 40)[0]
-                report.txhashset_hash_hex = block_hash.hex()
-                report.txhashset_height = height
-                report.txhashset_bytes_len = bytes_len
-                print(
-                    "Received TxHashSetArchive metadata "
-                    f"(hash={block_hash.hex()[:12]}.. height={height} bytes={bytes_len})"
+        archive_sink = open(archive_path or os.devnull, "wb")
+        try:
+            while time.monotonic() < state_deadline:
+                msg_type, body, attachment_bytes = (
+                    connection.recv_message_with_attachment_to(archive_sink)
                 )
-                return report
+                if msg_type == MSG_PING and len(body) >= 16:
+                    connection.send_raw(_pack_grin_message(MSG_PONG, body[:16]))
+                    continue
 
-            if msg_type == MSG_BAN_REASON:
-                raise LiveSyncError(
-                    "Peer responded with BanReason during state sync probe"
-                )
+                if msg_type == MSG_TXHASHSET_ARCHIVE:
+                    if len(body) < 48:
+                        raise LiveSyncError("Received malformed TxHashSetArchive message")
+                    block_hash = body[:32]
+                    height = struct.unpack_from(">Q", body, 32)[0]
+                    bytes_len = struct.unpack_from(">Q", body, 40)[0]
+                    if attachment_bytes != bytes_len:
+                        raise LiveSyncError(
+                            "TxHashSetArchive attachment length mismatch: "
+                            f"declared={bytes_len} received={attachment_bytes}"
+                        )
+                    report.txhashset_hash_hex = block_hash.hex()
+                    report.txhashset_height = height
+                    report.txhashset_bytes_len = bytes_len
+                    print(
+                        "Received TxHashSetArchive metadata "
+                        f"(hash={block_hash.hex()[:12]}.. height={height} "
+                        f"bytes={bytes_len} saved={archive_path or 'discarded'})"
+                    )
+                    return report
+
+                if msg_type == MSG_BAN_REASON:
+                    raise LiveSyncError(
+                        "Peer responded with BanReason during state sync probe"
+                    )
+        finally:
+            archive_sink.close()
 
         if require_state_sync:
             raise LiveSyncError("Timed out waiting for TxHashSetArchive response")
         return report
     finally:
-        sock.close()
+        connection.close()
 
 
 if __name__ == "__main__":
     require_state = os.getenv("GRIN_REQUIRE_STATE_SYNC", "1") != "0"
-    run_live_header_sync_smoke(require_state_sync=require_state)
+    run_live_header_sync_smoke(
+        require_state_sync=require_state,
+        txhashset_archive_path=os.getenv("GRIN_TXHASHSET_ARCHIVE_PATH"),
+    )
     print("Live sync smoke check passed")

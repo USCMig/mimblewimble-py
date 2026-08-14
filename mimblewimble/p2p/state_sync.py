@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -115,6 +116,12 @@ class StateSync:
         if pibd_peers:
             self._pibd_peer_last_seen = time.monotonic()
             return self._continue_pibd(pibd_peers, best_header_hash)
+
+        # Start the fallback clock even when no PIBD-capable peer was ever
+        # available. Otherwise a non-PIBD peer can leave snapshot fallback
+        # permanently disabled because the timestamp remains zero.
+        if self._pibd_peer_last_seen == 0.0:
+            self._pibd_peer_last_seen = time.monotonic()
 
         # No PIBD peers: check fallback timeout
         time_without_pibd = time.monotonic() - self._pibd_peer_last_seen
@@ -239,6 +246,8 @@ class StateSync:
         expected_output_root: bytes,
         expected_rangeproof_root: bytes,
         expected_kernel_root: bytes,
+        expected_output_mmr_size: int | None = None,
+        expected_kernel_mmr_size: int | None = None,
     ) -> bool:
         """Validate and apply a received TxHashSet ZIP.
 
@@ -271,25 +280,32 @@ class StateSync:
         # Open the extracted TxHashSet and verify roots
         try:
             tmp_txhs = TxHashSet(tmp_dir)
-            out_root = tmp_txhs.output_pmmr.root()
-            rp_root = tmp_txhs.rangeproof_pmmr.root()
-            kern_root = tmp_txhs.kernel_mmr.root()
-            for leaf_idx, pos0 in tmp_txhs.output_pmmr.leaf_idx_iter(0):
-                data = tmp_txhs.output_pmmr.get_data(pos0)
-                if data is None:
-                    continue
-                snapshot_outputs.append(
-                    OutputRecord(
-                        commitment_hex=hashlib.blake2b(
-                            data, digest_size=32
-                        ).hexdigest(),
-                        block_hash_hex=block_hash.hex(),
-                        height=height,
-                        status="snapshot",
-                        raw=data,
-                    )
+            try:
+                out_root = tmp_txhs.output_pmmr.root()
+                rp_root = tmp_txhs.rangeproof_pmmr.root()
+                kern_root = tmp_txhs.kernel_mmr.root()
+                self._validate_snapshot_sizes(
+                    tmp_txhs,
+                    expected_output_mmr_size,
+                    expected_kernel_mmr_size,
                 )
-            tmp_txhs.close()
+                for leaf_idx, pos0 in tmp_txhs.output_pmmr.leaf_idx_iter(0):
+                    data = tmp_txhs.output_pmmr.get_data(pos0)
+                    if data is None:
+                        continue
+                    snapshot_outputs.append(
+                        OutputRecord(
+                            commitment_hex=hashlib.blake2b(
+                                data, digest_size=32
+                            ).hexdigest(),
+                            block_hash_hex=block_hash.hex(),
+                            height=height,
+                            status="snapshot",
+                            raw=data,
+                        )
+                    )
+            finally:
+                tmp_txhs.close()
         except Exception as e:
             raise StateSyncError(f"Cannot read extracted TxHashSet: {e}") from e
 
@@ -323,6 +339,125 @@ class StateSync:
         # Move validated txhashset data into the live txhashset dir
         # (caller is responsible for this swap; we just confirm validity)
         return True
+
+    def receive_txhashset_stream(
+        self, block_hash: bytes, height: int, archive, size: int
+    ) -> bool:
+        """Persist and validate a streamed archive from the P2P receive loop."""
+        if self._archive_header is None:
+            log.warning("StateSync: received archive before header initialization")
+            return False
+
+        archive_path = self._data_dir / f"_snapshot_{block_hash.hex()[:16]}.zip"
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        with archive_path.open("wb") as destination:
+            shutil.copyfileobj(archive, destination, length=1 << 20)
+        written_size = archive_path.stat().st_size
+        if written_size != size:
+            archive_path.unlink(missing_ok=True)
+            raise StateSyncError(
+                f"TxHashSet archive size mismatch: expected {size}, "
+                f"wrote {written_size}"
+            )
+
+        header = self._archive_header
+        output_mmr_size = (
+            header.getOutputMMRSize()
+            if hasattr(header, "getOutputMMRSize")
+            else None
+        )
+        kernel_mmr_size = (
+            header.getKernelMMRSize()
+            if hasattr(header, "getKernelMMRSize")
+            else None
+        )
+        try:
+            applied = self.apply_snapshot_path(
+                block_hash,
+                height,
+                archive_path,
+                header.getOutputRoot(),
+                header.getRangeProofRoot(),
+                header.getKernelRoot(),
+                output_mmr_size,
+                kernel_mmr_size,
+            )
+            if applied:
+                self._sync_state.update(SyncStatus.BODY_SYNC)
+                log.info("StateSync: snapshot sync complete — transitioning to body sync")
+            return applied
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    def apply_snapshot_path(
+        self,
+        block_hash: bytes,
+        height: int,
+        zip_path: Path,
+        expected_output_root: bytes,
+        expected_rangeproof_root: bytes,
+        expected_kernel_root: bytes,
+        expected_output_mmr_size: int | None = None,
+        expected_kernel_mmr_size: int | None = None,
+    ) -> bool:
+        """Validate a TxHashSet ZIP from disk without loading it into memory."""
+        tmp_dir = self._data_dir / f"_snapshot_{block_hash.hex()[:16]}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            TxHashSetSync.extract(zip_path, tmp_dir)
+            tmp_txhs = TxHashSet(tmp_dir)
+            try:
+                self._validate_snapshot_sizes(
+                    tmp_txhs,
+                    expected_output_mmr_size,
+                    expected_kernel_mmr_size,
+                )
+                roots = (
+                    tmp_txhs.output_pmmr.root(),
+                    tmp_txhs.rangeproof_pmmr.root(),
+                    tmp_txhs.kernel_mmr.root(),
+                )
+            finally:
+                tmp_txhs.close()
+            expected = (
+                expected_output_root,
+                expected_rangeproof_root,
+                expected_kernel_root,
+            )
+            if roots != expected:
+                raise StateSyncError("Snapshot PMMR roots do not match archive header")
+            self._txhashset.replace_directory(tmp_dir)
+            log.info("StateSync: validated snapshot promoted to live TxHashSet")
+            return True
+        except (TxHashSetError, zipfile.BadZipFile, OSError, ValueError) as exc:
+            raise StateSyncError(f"Failed to validate snapshot ZIP: {exc}") from exc
+
+    @staticmethod
+    def _validate_snapshot_sizes(
+        txhashset: TxHashSet,
+        expected_output_mmr_size: int | None,
+        expected_kernel_mmr_size: int | None,
+    ) -> None:
+        if expected_output_mmr_size is not None:
+            actual_output_size = txhashset.output_pmmr.size()
+            actual_rangeproof_size = txhashset.rangeproof_pmmr.size()
+            if actual_output_size != expected_output_mmr_size:
+                raise StateSyncError(
+                    "Snapshot output MMR size mismatch: "
+                    f"got {actual_output_size} expected {expected_output_mmr_size}"
+                )
+            if actual_rangeproof_size != expected_output_mmr_size:
+                raise StateSyncError(
+                    "Snapshot rangeproof MMR size mismatch: "
+                    f"got {actual_rangeproof_size} expected {expected_output_mmr_size}"
+                )
+        if expected_kernel_mmr_size is not None:
+            actual_kernel_size = txhashset.kernel_mmr.size()
+            if actual_kernel_size != expected_kernel_mmr_size:
+                raise StateSyncError(
+                    "Snapshot kernel MMR size mismatch: "
+                    f"got {actual_kernel_size} expected {expected_kernel_mmr_size}"
+                )
 
     # ------------------------------------------------------------------
     # Segment delivery callbacks (called from peer dispatch)
