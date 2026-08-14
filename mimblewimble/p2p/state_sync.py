@@ -117,6 +117,12 @@ class StateSync:
             self._pibd_peer_last_seen = time.monotonic()
             return self._continue_pibd(pibd_peers, best_header_hash)
 
+        # Start the fallback clock even when no PIBD-capable peer was ever
+        # available. Otherwise a non-PIBD peer can leave snapshot fallback
+        # permanently disabled because the timestamp remains zero.
+        if self._pibd_peer_last_seen == 0.0:
+            self._pibd_peer_last_seen = time.monotonic()
+
         # No PIBD peers: check fallback timeout
         time_without_pibd = time.monotonic() - self._pibd_peer_last_seen
         if (
